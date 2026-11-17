@@ -1144,7 +1144,9 @@ class Query(graphene.ObjectType):
     identify_biometric = graphene.List(
         BiometricMatchType,
         modality=graphene.String(required=True),
-        sample=graphene.String(required=True, description="Base64-encoded probe sample."),
+        sample=GenericScalar(
+            required=True, description="Base64-encoded probe sample as text, optionally with a data: prefix.",
+        ),
         top_k=graphene.Int(required=False, description="Default 5, clamped to 1..BIOMETRIC['MAX_TOP_K'] (50)."),
         exclude_subject=graphene.String(required=False),
         description="Rank the gallery for one modality against a probe sample.",
@@ -1314,11 +1316,12 @@ class Query(graphene.ObjectType):
     def resolve_identify_biometric(root, info, modality, sample, top_k=None, exclude_subject=None):
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_identify_perms)
+        sample = _decode_sample(sample)
 
         from .services import identify
 
         matches = identify(
-            modality, sample=_decode_sample(sample), top_k=_clamp_top_k(top_k), exclude_subject=exclude_subject,
+            modality, sample=sample, top_k=_clamp_top_k(top_k), exclude_subject=exclude_subject,
             actor=user.username,
         )
         return [

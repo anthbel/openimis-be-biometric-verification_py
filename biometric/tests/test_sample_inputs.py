@@ -75,6 +75,7 @@ VERIFY = (
     "verifyBiometric(subjectId: \"s1\", modality: $modality, deviceScore: $deviceScore, sample: $sample, "
     "deviceVector: $deviceVector, deviceTemplate: $deviceTemplate) { verified origin } }"
 )
+IDENTIFY = "query ($sample: %s) { identifyBiometric(modality: \"face\", sample: $sample) { subjectId } }"
 MULTIMODAL = (
     "mutation ($legs: %s) { verifyBiometricMultimodal(subjectId: \"s1\", legs: $legs) { outcome legs { origin } } }"
 )
@@ -215,3 +216,18 @@ class TestSampleInputsOverHttp(SyntheticSubjectsMixin, _MultimodalServiceTestCas
             self.assertNotIn(VECTOR_DIGITS, json.dumps(answer))
         for sent in (SAMPLE[:24], TEMPLATE[:24], VECTOR_DIGITS):
             self.assertNotIn(sent, capture.text())
+
+    def test_identify_refuses_a_probe_sample_that_is_not_base64_text(self):
+        sample_type = _argument_type("query", "identifyBiometric", "sample")
+        with EveryLogger() as capture:
+            answers = [self.gql(IDENTIFY % sample_type, {"sample": sample}) for sample in ({"data": SAMPLE}, [SAMPLE])]
+            answers.append(self.gql('query { identifyBiometric(modality: "face", sample: {data: "%s"}) { subjectId } }'
+                                    % SAMPLE))
+        self.assertRefused(answers, SAMPLE_REFUSED % "sample")
+        self.assertQuotedNowhere(capture)
+
+    def test_identify_ranks_a_well_formed_probe_sample(self):
+        self.enrol(SAMPLE)
+        answer = self.gql(IDENTIFY % "GenericScalar!", {"sample": "data:image/jpeg;base64," + SAMPLE})
+        self.assertNotIn("errors", answer)
+        self.assertEqual([match["subjectId"] for match in answer["data"]["identifyBiometric"]], ["s1"])

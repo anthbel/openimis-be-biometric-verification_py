@@ -368,6 +368,7 @@ value) checked by the resolver. A client declares its variables with that type:
 | `verifyBiometric` | `deviceTemplate` | `GenericScalar` | base64 text |
 | `verifyBiometric` | `deviceVector` | `GenericScalar` | list of numbers |
 | `verifyBiometricMultimodal` | `legs` | `GenericScalar!` | list of `{modality, sample, position, deviceScore, deviceVector, deviceTemplate}` |
+| `identifyBiometric` (query) | `sample` | `GenericScalar!` | base64 text |
 
 A leg holds `modality` (text, required) and any of `sample` (base64 text),
 `position` (text), `deviceScore` (number), `deviceVector` (list of numbers) and

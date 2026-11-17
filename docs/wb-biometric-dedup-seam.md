@@ -326,9 +326,9 @@ Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`; queries
 `gql_biometric_enrol_perms=["174001"]`, `gql_biometric_verify_perms=["174002"]`,
 `gql_biometric_identify_perms=["174003"]`, `gql_biometric_read_perms=["174004"]`, following
 the pattern of the module's existing rights. Samples travel base64.
-The mutation arguments that carry a sample or a template are `GenericScalar` (a JSON value), whose
+The arguments that carry a sample or a template are `GenericScalar` (a JSON value), whose
 shape the resolver checks: `enrolBiometric(sample)`, `verifyBiometric(sample, deviceTemplate,
-deviceVector)` and `verifyBiometricMultimodal(legs)`. A value of another shape, an unknown or
+deviceVector)`, `verifyBiometricMultimodal(legs)` and the query `identifyBiometric(sample)`. A value of another shape, an unknown or
 missing leg field included, refuses the call with a fixed message and `extensions.code`
 `BIOMETRIC_SAMPLE_INPUT_REFUSED`, before the subject check and before any write; the message
 quotes nothing sent. graphql-core refuses an input object or a scalar that does not match its type
