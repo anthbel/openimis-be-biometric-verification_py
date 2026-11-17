@@ -348,8 +348,8 @@ provider_class)`; resolve the one configured for a modality with
 
 ### GraphQL
 
-Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`,
-`acknowledgeBiometricAlert`, `resolveBiometricAlert`;
+Mutations `enrolBiometric`, `verifyBiometric`, `verifyBiometricMultimodal`,
+`recordBiometricConsent`, `acknowledgeBiometricAlert`, `resolveBiometricAlert`;
 queries `identifyBiometric(modality, sample, topK, excludeSubject)`,
 `biometricTemplates(subjectId, subjectModel)` (metadata only — never
 plaintext vectors/templates), `biometricVerifications(subjectId, subjectModel)`,
@@ -357,6 +357,48 @@ and the relay connections `biometricAuditEvents` and `biometricAlerts`.
 `subjectModel` is optional everywhere it appears, defaulting to
 `BIOMETRIC["SUBJECT_MODEL"]`. Samples travel base64 (optionally with a
 `data:...;base64,` prefix).
+
+Every argument carrying a sample or a template is a `BiometricInput` (a scalar
+holding a JSON value) checked by the resolver. A client declares its variables
+with that type:
+
+| Field | Argument | Type | Value |
+|---|---|---|---|
+| `enrolBiometric` | `sample` | `BiometricInput!` | base64 text |
+| `verifyBiometric` | `sample` | `BiometricInput` | base64 text |
+| `verifyBiometric` | `deviceTemplate` | `BiometricInput` | base64 text |
+| `verifyBiometric` | `deviceVector` | `BiometricInput` | list of numbers |
+| `verifyBiometricMultimodal` | `legs` | `BiometricInput!` | list of `{modality, sample, position, deviceScore, deviceVector, deviceTemplate}` |
+| `identifyBiometric` (query) | `sample` | `BiometricInput!` | base64 text |
+
+A leg holds `modality` (text, required) and any of `sample` (base64 text),
+`position` (text), `deviceScore` (number), `deviceVector` (list of numbers) and
+`deviceTemplate` (base64 text); a null field counts as absent. The legs hold at
+least one leg, one per modality, each with exactly one of `sample` and
+`deviceScore`; `deviceVector` and `deviceTemplate` go with `deviceScore` only.
+
+Base64 is strict: only the base64 alphabet, padding at the end, no line breaks
+or other characters, after an optional `data:...;base64,` prefix.
+
+A value of another shape (an unknown or missing field, a number or object in
+place of text, text that is not base64, legs breaking the leg rules) refuses
+the call with one error whose `extensions.code` is
+`BIOMETRIC_SAMPLE_INPUT_REFUSED` and whose message is a fixed text naming the
+argument; it quotes nothing sent, and nothing is written.
+
+Pass each of these arguments as a variable, or as a literal written in full
+(text, numbers, `true`/`false`, lists, objects). A literal holding a variable
+or a bare name (an unquoted word) anywhere inside it refuses the call with the
+same code and a fixed message.
+
+```graphql
+mutation ($sample: BiometricInput!) {
+  enrolBiometric(subjectId: "...", modality: "face", sample: $sample) { id }
+}
+mutation ($legs: BiometricInput!) {
+  verifyBiometricMultimodal(subjectId: "...", legs: $legs) { outcome }
+}
+```
 
 ### Deduplication seam
 

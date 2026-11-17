@@ -1,9 +1,12 @@
 import base64
+import binascii
 
 import graphene
 from django.core.exceptions import PermissionDenied
 from django.utils.translation import gettext as _
 from graphene_django import DjangoObjectType
+from graphql.error import GraphQLError
+from graphql.language import ast as graphql_ast
 
 from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
@@ -19,25 +22,137 @@ from .models import (
 )
 
 
-def _decode_sample(sample):
-    """Base64 sample, optionally with a data-URI prefix."""
+# Sample and template arguments are JSON values (BiometricInput) whose shape the resolver checks: graphql-core refuses
+# an input object or a scalar that does not match its type with an error quoting the whole variable or literal,
+# samples included, which the assembly's GraphQL view logs.
+REFUSED_CODE = "BIOMETRIC_SAMPLE_INPUT_REFUSED"
+SAMPLE_REFUSED = "%s: base64 text, optionally with a data:...;base64, prefix"
+VECTOR_REFUSED = "deviceVector: a list of numbers"
+LEGS_REFUSED = (
+    "legs: a list of objects holding modality as text and no other field than sample, position and deviceTemplate "
+    "as text, deviceScore as a number and deviceVector as a list of numbers"
+)
+LEG_RULES_REFUSED = (
+    "legs: at least one leg, one per modality, each with exactly one of sample and deviceScore; deviceVector and "
+    "deviceTemplate go with deviceScore only"
+)
+LITERAL_REFUSED = (
+    "a biometric input written in the query is text, numbers, true or false, lists and objects only, with no "
+    "variable or bare name inside it"
+)
+LEG_FIELDS = frozenset({"modality", "sample", "position", "deviceScore", "deviceVector", "deviceTemplate"})
+
+
+class SampleInputRefusedError(ValueError):
+    """A sample or template argument of the wrong shape; the message is fixed and quotes nothing sent."""
+
+    def __init__(self, message):
+        self.extensions = {"code": REFUSED_CODE}
+        super().__init__(message)
+
+
+class BiometricInput(graphene.Scalar):
+    """
+    A sample, template, vector or leg list as a JSON value, its shape checked by the resolver. A literal is read in
+    full or refused with a fixed message: graphql-core quotes a literal its scalar cannot read, and a variable inside
+    a literal never reaches the resolver.
+    """
+
+    @staticmethod
+    def serialize(value):
+        return value
+
+    @staticmethod
+    def parse_value(value):
+        return value
+
+    @staticmethod
+    def parse_literal(node):
+        if isinstance(node, (graphql_ast.StringValue, graphql_ast.BooleanValue)):
+            return node.value
+        if isinstance(node, graphql_ast.IntValue):
+            return int(node.value)
+        if isinstance(node, graphql_ast.FloatValue):
+            return float(node.value)
+        if isinstance(node, graphql_ast.ListValue):
+            return [BiometricInput.parse_literal(value) for value in node.values]
+        if isinstance(node, graphql_ast.ObjectValue):
+            return {field.name.value: BiometricInput.parse_literal(field.value) for field in node.fields}
+        raise GraphQLError(LITERAL_REFUSED, extensions={"code": REFUSED_CODE})
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _decode_sample(sample, argument="sample"):
+    """Base64 sample, optionally with a data-URI prefix; None stays None."""
     if sample is None:
         return None
+    if not isinstance(sample, str):
+        raise SampleInputRefusedError(SAMPLE_REFUSED % argument)
     if "," in sample:
         sample = sample.split(",", 1)[1]
-    return base64.b64decode(sample)
+    try:
+        return base64.b64decode(sample, validate=True)
+    except (binascii.Error, ValueError):
+        raise SampleInputRefusedError(SAMPLE_REFUSED % argument) from None
+
+
+def _device_vector(value):
+    """The device vector as floats; None stays None."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not all(_is_number(item) for item in value):
+        raise SampleInputRefusedError(VECTOR_REFUSED)
+    return [float(item) for item in value]
 
 
 def _device_template(device_vector, device_template):
     """Extracted from a device-supplied vector and/or base64 template; None when neither is given."""
-    if device_vector is None and device_template is None:
+    vector = _device_vector(device_vector)
+    template = _decode_sample(device_template, "deviceTemplate")
+    if vector is None and template is None:
         return None
     from .providers.base import Extracted
 
-    return Extracted(
-        vector=list(device_vector) if device_vector is not None else None,
-        template=_decode_sample(device_template),
-    )
+    return Extracted(vector=vector, template=template)
+
+
+def _service_legs(legs):
+    """The legs of verifyBiometricMultimodal as verify_multimodal() reads them; a null field counts as absent."""
+    if not isinstance(legs, list):
+        raise SampleInputRefusedError(LEGS_REFUSED)
+    service_legs = []
+    for leg in legs:
+        if not isinstance(leg, dict) or set(leg) - LEG_FIELDS or not isinstance(leg.get("modality"), str):
+            raise SampleInputRefusedError(LEGS_REFUSED)
+        if any(leg.get(name) is not None and not isinstance(leg[name], str)
+               for name in ("sample", "position", "deviceTemplate")):
+            raise SampleInputRefusedError(LEGS_REFUSED)
+        if leg.get("deviceScore") is not None and not _is_number(leg["deviceScore"]):
+            raise SampleInputRefusedError(LEGS_REFUSED)
+        if leg.get("deviceVector") is not None and (
+                not isinstance(leg["deviceVector"], list) or not all(_is_number(i) for i in leg["deviceVector"])):
+            raise SampleInputRefusedError(LEGS_REFUSED)
+        service_leg = {"modality": leg["modality"]}
+        if leg.get("sample") is not None:
+            service_leg["sample"] = _decode_sample(leg["sample"], "legs.sample")
+        if leg.get("deviceScore") is not None:
+            service_leg["device_score"] = float(leg["deviceScore"])
+        if leg.get("position"):
+            service_leg["position"] = leg["position"]
+        device_template = _device_template(leg.get("deviceVector"), leg.get("deviceTemplate"))
+        if device_template is not None:
+            service_leg["device_template"] = device_template
+        service_legs.append(service_leg)
+    from .services import _check_legs
+
+    try:
+        _check_legs(service_legs)
+    except ValueError:
+        raise SampleInputRefusedError(LEG_RULES_REFUSED) from None
+    return service_legs
 
 
 class OrderByRefusedError(ValueError):
@@ -361,22 +476,6 @@ class BiometricMultimodalVerifyResultType(graphene.ObjectType):
     legs = graphene.List(graphene.NonNull(BiometricVerifyResultType), required=True)
 
 
-class BiometricVerifyLegInput(graphene.InputObjectType):
-    """One modality of a multimodal verification: a sample (server path) or a device score."""
-    modality = graphene.String(required=True)
-    sample = graphene.String(required=False, description="Base64-encoded sample (server path).")
-    position = graphene.String(required=False)
-    device_score = graphene.Float(required=False)
-    device_vector = graphene.List(
-        graphene.NonNull(graphene.Float), required=False,
-        description="Vector the device extracted, ranked by the impersonation probe on the device path.",
-    )
-    device_template = graphene.String(
-        required=False,
-        description="Base64 template the device extracted, ranked by the impersonation probe on the device path.",
-    )
-
-
 class EnrolBiometricMutation(graphene.Mutation):
     """
     Extract (or accept a device template for) one sample and store it as the subject's active template.
@@ -390,7 +489,9 @@ class EnrolBiometricMutation(graphene.Mutation):
     class Arguments:
         subject_id = graphene.String(required=True)
         modality = graphene.String(required=True)
-        sample = graphene.String(required=True, description="Base64-encoded sample.")
+        sample = BiometricInput(
+            required=True, description="Base64-encoded sample as text, optionally with a data:...;base64, prefix.",
+        )
         subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
         position = graphene.String(required=False)
         metadata = graphene.JSONString(required=False)
@@ -402,12 +503,13 @@ class EnrolBiometricMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
+        sample = _decode_sample(sample)
         _require_subject(user, subject_model, subject_id)
 
         from .services import enrol
 
         template = enrol(
-            subject_model, subject_id, modality, _decode_sample(sample),
+            subject_model, subject_id, modality, sample,
             position=position, actor=user.username, metadata=metadata,
         )
         return BiometricTemplateType(
@@ -436,7 +538,9 @@ class VerifyBiometricMutation(graphene.Mutation):
         subject_id = graphene.String(required=True)
         modality = graphene.String(required=True)
         subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
-        sample = graphene.String(required=False, description="Base64-encoded sample (server path).")
+        sample = BiometricInput(
+            required=False, description="Base64-encoded sample as text (server path), optionally with a data: prefix.",
+        )
         position = graphene.String(required=False)
         device_score = graphene.Float(required=False)
         fallback = graphene.Boolean(required=False)
@@ -446,13 +550,15 @@ class VerifyBiometricMutation(graphene.Mutation):
             required=False,
             description="Named risk profile from BIOMETRIC['RISK_PROFILES']; it may only raise the modality threshold.",
         )
-        device_vector = graphene.List(
-            graphene.NonNull(graphene.Float), required=False,
-            description="Vector the device extracted, ranked by the impersonation probe on the device path.",
-        )
-        device_template = graphene.String(
+        device_vector = BiometricInput(
             required=False,
-            description="Base64 template the device extracted, ranked by the impersonation probe on the device path.",
+            description="List of numbers: the vector the device extracted, ranked by the impersonation probe on the "
+                        "device path.",
+        )
+        device_template = BiometricInput(
+            required=False,
+            description="Base64 text: the template the device extracted, ranked by the impersonation probe on the "
+                        "device path.",
         )
 
     Output = BiometricVerifyResultType
@@ -464,15 +570,17 @@ class VerifyBiometricMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
+        sample = _decode_sample(sample)
+        device_template = _device_template(device_vector, device_template)
         _require_subject(user, subject_model, subject_id)
 
         from .services import verify
 
         result = verify(
-            subject_model, subject_id, modality, sample=_decode_sample(sample), position=position,
+            subject_model, subject_id, modality, sample=sample, position=position,
             device_score=device_score, fallback=bool(fallback), context=context,
             device_id=device_id or "", actor=user.username, risk_profile=risk_profile or None,
-            device_template=_device_template(device_vector, device_template),
+            device_template=device_template,
         )
         return _verify_result_gql(result, user)
 
@@ -491,7 +599,11 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
     class Arguments:
         subject_id = graphene.String(required=True)
         subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
-        legs = graphene.List(graphene.NonNull(BiometricVerifyLegInput), required=True)
+        legs = BiometricInput(
+            required=True,
+            description="[{modality, sample, position, deviceScore, deviceVector, deviceTemplate}]: one object per "
+                        "modality, a sample (base64 text, server path) or a device score.",
+        )
         risk_profile = graphene.String(
             required=False, description="Named risk profile from BIOMETRIC['RISK_PROFILES']; it may only tighten.",
         )
@@ -507,23 +619,10 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
         _check_csrf(info)
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_verify_perms)
+        service_legs = _service_legs(legs)
         _require_subject(user, subject_model, subject_id)
 
         from .services import verify_multimodal
-
-        service_legs = []
-        for leg in legs:
-            service_leg = {"modality": leg.modality}
-            if leg.sample is not None:
-                service_leg["sample"] = _decode_sample(leg.sample)
-            if leg.device_score is not None:
-                service_leg["device_score"] = leg.device_score
-            if leg.position:
-                service_leg["position"] = leg.position
-            device_template = _device_template(leg.device_vector, leg.device_template)
-            if device_template is not None:
-                service_leg["device_template"] = device_template
-            service_legs.append(service_leg)
 
         result = verify_multimodal(
             subject_model, subject_id, service_legs, fallback=bool(fallback), context=context,
@@ -1091,7 +1190,9 @@ class Query(graphene.ObjectType):
     identify_biometric = graphene.List(
         BiometricMatchType,
         modality=graphene.String(required=True),
-        sample=graphene.String(required=True, description="Base64-encoded probe sample."),
+        sample=BiometricInput(
+            required=True, description="Base64-encoded probe sample as text, optionally with a data: prefix.",
+        ),
         top_k=graphene.Int(required=False, description="Default 5, clamped to 1..BIOMETRIC['MAX_TOP_K'] (50)."),
         exclude_subject=graphene.String(required=False),
         description="Rank the gallery for one modality against a probe sample.",
@@ -1261,11 +1362,12 @@ class Query(graphene.ObjectType):
     def resolve_identify_biometric(root, info, modality, sample, top_k=None, exclude_subject=None):
         user = info.context.user
         _require_perms(user, BiometricConfig.gql_biometric_identify_perms)
+        sample = _decode_sample(sample)
 
         from .services import identify
 
         matches = identify(
-            modality, sample=_decode_sample(sample), top_k=_clamp_top_k(top_k), exclude_subject=exclude_subject,
+            modality, sample=sample, top_k=_clamp_top_k(top_k), exclude_subject=exclude_subject,
             actor=user.username,
         )
         return [
