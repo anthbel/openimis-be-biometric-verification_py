@@ -433,7 +433,8 @@ the corresponding side row — nothing needs to be re-run after normal use.
 
 **An ANN index cannot search encrypted vectors.** `biometric_vector_index`
 always stores the embedding in clear, decrypted from `biometric_template` at
-sync time, regardless of `BIOMETRIC["TEMPLATE_KEY"]`. If a key is set —
+sync time, regardless of `BIOMETRIC["TEMPLATE_KEY"]`. If a key is set (in the
+configuration or through `BIOMETRIC_TEMPLATE_KEY`) —
 templates are meant to be encrypted at rest — installing this app would
 silently defeat that guarantee, so `biometric_pgvector` refuses to start
 (`ImproperlyConfigured` at `AppConfig.ready()`) unless

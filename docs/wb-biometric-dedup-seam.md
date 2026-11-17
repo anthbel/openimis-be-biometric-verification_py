@@ -575,11 +575,12 @@ where the Postgres server has the `vector` extension.
   LIMIT k`), inside a transaction that sets `SET LOCAL hnsw.ef_search =
   BiometricPgvectorConfig.hnsw_ef_search`, applying the `scope` filter through the template join
   and `exclude_subject`. `BiometricPgvectorConfig.ready()` reads `HNSW_EF_SEARCH` (default 200)
-  once, from the `biometric` ModuleConfiguration row then `settings.BIOMETRIC`; a change takes
-  effect at the next start.
+  once, through `biometric.apps.resolve_config()` (the `biometric` ModuleConfiguration row, then
+  `settings.BIOMETRIC`); a change takes effect at the next start.
   Returns the same `Match` objects as the NumPy path, similarity = 1 − cosine distance.
 - Plaintext: the index stores vectors in clear — an ANN index cannot search encrypted
-  vectors. When `TEMPLATE_KEY` is set, `biometric_pgvector` refuses to start
+  vectors. When `TEMPLATE_KEY` resolves to a key (including one given only by
+  `BIOMETRIC_TEMPLATE_KEY`), `biometric_pgvector` refuses to start
   (`ImproperlyConfigured`) unless `BIOMETRIC["ALLOW_PLAINTEXT_INDEX"]` is `True`. README
   states this trade-off plainly.
 - Tests run against a vector-capable Postgres: container `pgvector/pgvector:pg13` on

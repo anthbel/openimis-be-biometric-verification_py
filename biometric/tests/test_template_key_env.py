@@ -10,6 +10,7 @@ import os
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
+from django.core.exceptions import ImproperlyConfigured
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from biometric import apps as biometric_apps
@@ -131,3 +132,25 @@ class TestTemplateKeyFromTheEnvironment(ConfigSnapshotMixin, TestCase):
         after = list(self._stored_rows().values_list("config", flat=True))
         self.assertEqual(after, before)
         self.assertNotIn(self.key, "".join(after))
+
+
+@override_settings(BIOMETRIC={})
+class TestPgvectorGuardSeesTheEnvironmentKey(SimpleTestCase):
+    """biometric_pgvector's plaintext-index guard reads the key as resolve_config() does."""
+
+    def _guard(self, env_value):
+        from biometric_pgvector.apps import BiometricPgvectorConfig
+
+        with _env(env_value), patch("core.models.ModuleConfiguration.get_or_default", return_value={}):
+            BiometricPgvectorConfig._guard_plaintext_index()
+
+    def test_a_key_given_only_by_the_environment_refuses_a_plaintext_index(self):
+        key = Fernet.generate_key().decode()
+
+        with self.assertRaises(ImproperlyConfigured) as raised:
+            self._guard(key)
+
+        self.assertNotIn(key, str(raised.exception))
+
+    def test_a_blank_environment_value_is_no_key(self):
+        self._guard("  ")

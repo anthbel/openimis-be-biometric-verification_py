@@ -1,19 +1,16 @@
 """
 Reads the BIOMETRIC config keys this app depends on — ALLOW_PLAINTEXT_INDEX,
-HNSW_EF_SEARCH and TEMPLATE_KEY (docs/wb-biometric-dedup-seam.md §6.2). Same source and override order as BiometricConfig.ready() (the
-"biometric" ModuleConfiguration row, then django.conf.settings.BIOMETRIC),
-replicated here rather than added to biometric/apps.py.
+HNSW_EF_SEARCH and TEMPLATE_KEY (docs/wb-biometric-dedup-seam.md §6.2) — from
+biometric.apps.resolve_config(): the "biometric" ModuleConfiguration row, then
+django.conf.settings.BIOMETRIC, with TEMPLATE_KEY falling back to the
+BIOMETRIC_TEMPLATE_KEY environment variable.
 """
-
-from core.models import ModuleConfiguration
-from django.conf import settings
 
 
 def _raw_biometric_cfg():
-    cfg = dict(ModuleConfiguration.get_or_default("biometric", {}))
-    for key, value in (getattr(settings, "BIOMETRIC", {}) or {}).items():
-        cfg[key.lower()] = value
-    return cfg
+    from biometric.apps import resolve_config
+
+    return resolve_config()
 
 
 def template_key():
