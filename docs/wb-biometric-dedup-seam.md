@@ -39,6 +39,7 @@ Config: `BIOMETRIC["SUBJECT_MODEL"]` and `DEDUPLICATION["SUBJECT_MODEL"]`, both 
 class Watermark:
     updated_at: datetime | None = None
     last_id: str | None = None
+    snapshot: ReadSnapshot | None = None   # row versions the scan read (deduplication/sources/snapshot.py)
 
 @dataclass(frozen=True)
 class Candidate:
@@ -57,6 +58,7 @@ class CandidateSource(abc.ABC):
     def watermark(self) -> Watermark: ...      # where the next scan starts
     def covered(self, subject_model: str, subject_ids, state) -> set: ...
         # the ids, as passed, its last scan covered; default: (date_updated, id) at or before the cursor
+        # and the current version read by the scan's snapshot
 
 def register(source: CandidateSource) -> None
 def sources() -> list[CandidateSource]        # registration order
@@ -305,13 +307,19 @@ Management command `biometric_purge`. Acts only when the policy has both fields 
 ### 3.5 Candidate source — `dedup_source.py`
 
 `BiometricCandidateSource(modality="face")`: `scan(since)` iterates active templates of the
-modality whose `date_updated`/id are past the watermark, ranks each against the gallery with
+modality whose `date_updated`/id are past the watermark or whose current version the watermark's
+snapshot did not read (a template committed after the previous scan started, whatever its
+`date_updated`), ranks each against the gallery with
 its own subject excluded (top 5), and yields a `Candidate(kind="biometric", score, evidence={"modality", "provider",
 "model_name", "template_a", "template_b"})` per match at or above `DEDUP_THRESHOLD[modality]`.
-Pairs are ordered with `order_pair`. `watermark()` returns the newest `(date_updated, id)` seen.
+A watermark without a snapshot probes every active template.
+Pairs are ordered with `order_pair`. `watermark()` returns the newest `(date_updated, id)` seen,
+with the `ReadSnapshot` of the active templates of the modality taken first (when the
+deduplication module provides it).
 `covered(subject_model, subject_ids, state)` returns the ids among `subject_ids`, as passed, whose
 every active template of the modality is at or before the cursor of `state` (the source's `ScanState`
-row), and the ids without an active template of the modality, whatever the cursor: an empty gallery
+row) and read by its snapshot (`summary["snapshot"]`; a state without one applies the cursor alone),
+and the ids without an active template of the modality, whatever the cursor: an empty gallery
 covers every subject. It covers nobody until a scan has completed (`state.last_scan_at` unset).
 On the numpy and template paths the scan reads and decrypts the gallery once
 (`services.Gallery`, the ranking `identify()` uses) and ranks every probe against it; a probe

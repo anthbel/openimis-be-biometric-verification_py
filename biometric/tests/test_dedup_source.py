@@ -135,7 +135,7 @@ class TestWatermark(_DedupSourceTestCase):
         self._make_template("b-subject", [1.0, 0.0])  # arrives "since" the first watermark
 
         source = BiometricCandidateSource(modality="face")
-        candidates = list(source.scan(Watermark(updated_at=first_watermark.updated_at, last_id=first_watermark.last_id)))
+        candidates = list(source.scan(first_watermark))
 
         # Only the newly-scanned template drives a scan iteration, but it still
         # matches against the full gallery (including the earlier template).
