@@ -318,9 +318,11 @@ with the `ReadSnapshot` of the active templates of the modality taken first (whe
 deduplication module provides it).
 `covered(subject_model, subject_ids, state)` returns the ids among `subject_ids`, as passed, whose
 every active template of the modality is at or before the cursor of `state` (the source's `ScanState`
-row) and read by its snapshot (`summary["snapshot"]`; a state without one applies the cursor alone),
-and the ids without an active template of the modality, whatever the cursor: an empty gallery
-covers every subject. It covers nobody until a scan has completed (`state.last_scan_at` unset).
+row) and read by its snapshot (`summary["snapshot"]`), and the ids without an active template of
+the modality, whatever the cursor: an empty gallery covers every subject. It covers nobody until a
+scan has completed (`state.last_scan_at` unset), nor with a state that keeps no snapshot or one of
+another database cluster. Without the deduplication module's snapshots (an older deduplication
+module), the cursor alone applies and every scan probes every active template.
 On the numpy and template paths the scan reads and decrypts the gallery once
 (`services.Gallery`, the ranking `identify()` uses) and ranks every probe against it; a probe
 row found in the gallery reuses its decrypted value. On the pgvector path each probe runs
