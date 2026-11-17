@@ -5,6 +5,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional
 
 from .crypto import TemplateKeyError  # noqa: F401  (re-exported for callers)
 from .providers.base import VerificationResult
+from .subjects import canonical_subject_model
 from .quality import QualityRefusedError  # noqa: F401  (re-exported for callers)
 from .risk_profiles import RiskProfileError, UnknownRiskProfileError  # noqa: F401  (re-exported for callers)
 
@@ -87,6 +88,7 @@ def run_consent_checks(subject_model, subject_id, modality) -> List[str]:
     order. The first check that raises (ConsentRequiredError or any other
     error) stops the run and its exception propagates.
     """
+    subject_model = canonical_subject_model(subject_model)
     passed = []
     for key, check in list(_consent_checks.items()):
         check(subject_model, subject_id, modality)
@@ -108,7 +110,7 @@ def record_consent(subject_model, subject_id, modality, granted, *, actor, note=
     if subject_id is None or modality is None or granted is None:
         raise TypeError("record_consent() requires subject_id, modality and granted.")
 
-    subject_model = subject_model or BiometricConfig.subject_model
+    subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
     subject_id = str(subject_id)
     granted = bool(granted)
     if granted:
@@ -188,7 +190,7 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     if subject_id is None or modality is None or sample is None:
         raise TypeError("enrol() requires subject_id, modality and sample.")
 
-    subject_model = subject_model or BiometricConfig.subject_model
+    subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
     subject_id = str(subject_id)
     position = position or ""
     metadata = dict(metadata or {})
@@ -343,7 +345,7 @@ def verify(subject_model=None, subject_id=None, modality=None, *, sample=None, p
     if device_template is not None and device_score is None:
         raise ValueError("verify(): device_template applies to the device path only (device_score).")
 
-    subject_model = subject_model or BiometricConfig.subject_model
+    subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
     subject_id = str(subject_id)
     context = dict(context or {})
     modality_cfg = BiometricConfig.modalities.get(modality, {})
@@ -598,7 +600,7 @@ def verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallbac
     ]
     decision = fuse({result.modality: result.confidence for result in results}, risk_profile=risk_profile)
 
-    subject_model = subject_model or BiometricConfig.subject_model
+    subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
     subject_id = str(subject_id)
     modalities = [result.modality for result in results]
     verification_ids = [result.verification_id for result in results]
@@ -1009,7 +1011,7 @@ def consolidate(subject_model=None, kept_id=None, retired_id=None, *, actor):
     if kept_id is None or retired_id is None:
         raise TypeError("consolidate() requires kept_id and retired_id.")
 
-    subject_model = subject_model or BiometricConfig.subject_model
+    subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
     kept_id = str(kept_id)
     retired_id = str(retired_id)
     counts = {}
@@ -1066,7 +1068,7 @@ def templates_of(subject_model=None, subject_id=None, *, modality=None, actor, p
     if subject_id is None:
         raise TypeError("templates_of() requires subject_id.")
 
-    subject_model = subject_model or BiometricConfig.subject_model
+    subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
     subject_id = str(subject_id)
     key = BiometricConfig.template_key
 

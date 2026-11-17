@@ -318,6 +318,9 @@ provider_class)`; resolve the one configured for a modality with
   raises `ConsentRequiredError` to refuse. Registering a key again replaces its
   check. `run_consent_checks(subject_model, subject_id, modality)` runs them all
   and returns the passing keys in registration order.
+- A subject model label naming an installed model in any case (`individual.individual`) is replaced by the
+  model's own label (`individual.Individual`) before the checks run, before a row is stored and in every
+  lookup, the configured `SUBJECT_MODEL` included (`subjects.canonical_subject_model`).
 - `record_consent(subject_model, subject_id, modality, granted, *, actor, note="")`
   — records a `BiometricConsent` row. A grant runs every registered consent
   check first and records nothing when one refuses; a refusal (`granted=False`)

@@ -152,8 +152,8 @@ class TestRecordConsent(_ConsentCheckTestCase):
         self.assertTrue(BiometricConsent.objects.filter(id=row.id, granted=True, note="").exists())
 
 
-class TestGraphqlCallersAreChecked(_ConsentCheckTestCase):
-    """A superuser and a user holding only 174001 meet the same checks."""
+class _GraphqlCallersTestCase(_ConsentCheckTestCase):
+    """A superuser and a user holding only 174001, and an individual in their scope."""
 
     def setUp(self):
         super().setUp()
@@ -197,6 +197,10 @@ class TestGraphqlCallersAreChecked(_ConsentCheckTestCase):
         self.assertFalse(self.enroller.is_superuser)
         return {"superuser": self.superuser, "174001 holder": self.enroller}
 
+
+class TestGraphqlCallersAreChecked(_GraphqlCallersTestCase):
+    """A superuser and a user holding only 174001 meet the same checks."""
+
     def test_a_refusing_check_refuses_enrol_and_a_grant_for_every_caller(self):
         self._register("registry", refuse=True)
 
@@ -230,3 +234,55 @@ class TestGraphqlCallersAreChecked(_ConsentCheckTestCase):
         row = BiometricTemplate.objects.get(subject_id=self.subject_id, validity_to__isnull=True)
         self.assertEqual(row.metadata["consent_checks"], ["registry"])
         self.assertEqual(BiometricConsent.objects.filter(subject_id=self.subject_id, granted=True).count(), 2)
+
+
+class TestSubjectModelInAnotherCase(_GraphqlCallersTestCase):
+    """A subject model named in another case reaches the checks, the rows and the lookups as the model's own label."""
+
+    VARIANTS = ("individual.individual", "INDIVIDUAL.INDIVIDUAL", "Individual.individual")
+
+    def _register_person_check(self):
+        def check(subject_model, subject_id, modality):
+            self.calls.append(subject_model)
+            if subject_model == SUBJECT_MODEL:
+                raise ConsentRequiredError("no consent")
+
+        services.register_consent_check("registry", check)
+
+    def _with_model(self, user, label, mutation):
+        if mutation == "enrolBiometric":
+            query = ('mutation { enrolBiometric(subjectModel: "%s", subjectId: "%s", modality: "face", sample: "%s") '
+                     '{ id } }' % (label, self.subject_id, SAMPLE))
+        else:
+            query = ('mutation { recordBiometricConsent(subjectModel: "%s", subjectId: "%s", modality: "face", '
+                     'granted: true) { ok id } }' % (label, self.subject_id))
+        return self._execute(query, user)
+
+    def test_the_checks_see_the_models_own_label_and_refuse_every_caller(self):
+        self._register_person_check()
+        for label in self.VARIANTS:
+            for name, user in self._users().items():
+                for mutation in ("enrolBiometric", "recordBiometricConsent"):
+                    with self.subTest(label=label, user=name, mutation=mutation):
+                        result = self._with_model(user, label, mutation)
+                        self.assertIsNone((result.data or {}).get(mutation))
+                        self.assertIsInstance(getattr(result.errors[0], "original_error", None),
+                                              ConsentRequiredError)
+        self.assertEqual(set(self.calls), {SUBJECT_MODEL})
+        self.assertFalse(BiometricTemplate.objects.exists())
+        self.assertFalse(BiometricConsent.objects.exists())
+
+    def test_rows_are_stored_and_read_under_the_models_own_label(self):
+        self._register("registry")
+        for label in self.VARIANTS:
+            services.record_consent(label, self.subject_id, "face", True, actor="agent")
+            enrol(label, self.subject_id, "face", b"photo", actor="agent")
+        self.assertEqual(set(BiometricConsent.objects.values_list("subject_model", flat=True)), {SUBJECT_MODEL})
+        self.assertEqual(set(BiometricTemplate.objects.values_list("subject_model", flat=True)), {SUBJECT_MODEL})
+        self.assertEqual(len(services.templates_of("individual.INDIVIDUAL", self.subject_id, actor="agent")), 1)
+
+    def test_a_configured_subject_model_in_another_case_resolves_to_the_models_own_label(self):
+        from biometric.apps import resolve_config
+
+        self.assertEqual(resolve_config({"subject_model": "INDIVIDUAL.individual"})["subject_model"], SUBJECT_MODEL)
+        self.assertEqual(resolve_config({"subject_model": "missing.Model"})["subject_model"], "missing.Model")

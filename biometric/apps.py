@@ -133,6 +133,9 @@ def resolve_config(module_cfg=None) -> dict:
         else:
             cfg[normalised] = copy.deepcopy(value)
     cfg["template_key"] = key or _given_key(os.environ.get(TEMPLATE_KEY_ENV))
+    from .subjects import canonical_subject_model
+
+    cfg["subject_model"] = canonical_subject_model(cfg.get("subject_model"))
     return cfg
 
 

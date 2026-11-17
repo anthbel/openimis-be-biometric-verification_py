@@ -9,6 +9,7 @@ from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
 
 from .apps import BiometricConfig
+from .subjects import canonical_subject_model
 from .models import (
     BiometricAlert,
     BiometricAuditEvent,
@@ -1284,7 +1285,7 @@ class Query(graphene.ObjectType):
         from .audit_chain import ACTION_TEMPLATE_LIST, audit_enabled, record_event
         from .models import BiometricTemplate
 
-        subject_model = subject_model or BiometricConfig.subject_model
+        subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
         rows = list(BiometricTemplate.objects.filter(
             subject_model=subject_model, subject_id=str(subject_id), validity_to__isnull=True,
         ))
@@ -1312,7 +1313,7 @@ class Query(graphene.ObjectType):
 
         from .models import BiometricVerification as BiometricVerificationModel
 
-        subject_model = subject_model or BiometricConfig.subject_model
+        subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
         rows = BiometricVerificationModel.objects.filter(
             subject_model=subject_model, subject_id=str(subject_id),
         ).order_by("-created_at")
