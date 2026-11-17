@@ -4,8 +4,9 @@ import binascii
 import graphene
 from django.core.exceptions import PermissionDenied
 from django.utils.translation import gettext as _
-from graphene.types.generic import GenericScalar
 from graphene_django import DjangoObjectType
+from graphql.error import GraphQLError
+from graphql.language import ast as graphql_ast
 
 from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
@@ -21,14 +22,23 @@ from .models import (
 )
 
 
-# Sample and template arguments are JSON values (GenericScalar) whose shape the resolver checks: graphql-core refuses
+# Sample and template arguments are JSON values (BiometricInput) whose shape the resolver checks: graphql-core refuses
 # an input object or a scalar that does not match its type with an error quoting the whole variable or literal,
 # samples included, which the assembly's GraphQL view logs.
+REFUSED_CODE = "BIOMETRIC_SAMPLE_INPUT_REFUSED"
 SAMPLE_REFUSED = "%s: base64 text, optionally with a data:...;base64, prefix"
 VECTOR_REFUSED = "deviceVector: a list of numbers"
 LEGS_REFUSED = (
     "legs: a list of objects holding modality as text and no other field than sample, position and deviceTemplate "
     "as text, deviceScore as a number and deviceVector as a list of numbers"
+)
+LEG_RULES_REFUSED = (
+    "legs: at least one leg, one per modality, each with exactly one of sample and deviceScore; deviceVector and "
+    "deviceTemplate go with deviceScore only"
+)
+LITERAL_REFUSED = (
+    "a biometric input written in the query is text, numbers, true or false, lists and objects only, with no "
+    "variable or bare name inside it"
 )
 LEG_FIELDS = frozenset({"modality", "sample", "position", "deviceScore", "deviceVector", "deviceTemplate"})
 
@@ -37,8 +47,38 @@ class SampleInputRefusedError(ValueError):
     """A sample or template argument of the wrong shape; the message is fixed and quotes nothing sent."""
 
     def __init__(self, message):
-        self.extensions = {"code": "BIOMETRIC_SAMPLE_INPUT_REFUSED"}
+        self.extensions = {"code": REFUSED_CODE}
         super().__init__(message)
+
+
+class BiometricInput(graphene.Scalar):
+    """
+    A sample, template, vector or leg list as a JSON value, its shape checked by the resolver. A literal is read in
+    full or refused with a fixed message: graphql-core quotes a literal its scalar cannot read, and a variable inside
+    a literal never reaches the resolver.
+    """
+
+    @staticmethod
+    def serialize(value):
+        return value
+
+    @staticmethod
+    def parse_value(value):
+        return value
+
+    @staticmethod
+    def parse_literal(node):
+        if isinstance(node, (graphql_ast.StringValue, graphql_ast.BooleanValue)):
+            return node.value
+        if isinstance(node, graphql_ast.IntValue):
+            return int(node.value)
+        if isinstance(node, graphql_ast.FloatValue):
+            return float(node.value)
+        if isinstance(node, graphql_ast.ListValue):
+            return [BiometricInput.parse_literal(value) for value in node.values]
+        if isinstance(node, graphql_ast.ObjectValue):
+            return {field.name.value: BiometricInput.parse_literal(field.value) for field in node.fields}
+        raise GraphQLError(LITERAL_REFUSED, extensions={"code": REFUSED_CODE})
 
 
 def _is_number(value):
@@ -54,7 +94,7 @@ def _decode_sample(sample, argument="sample"):
     if "," in sample:
         sample = sample.split(",", 1)[1]
     try:
-        return base64.b64decode(sample)
+        return base64.b64decode(sample, validate=True)
     except (binascii.Error, ValueError):
         raise SampleInputRefusedError(SAMPLE_REFUSED % argument) from None
 
@@ -106,6 +146,12 @@ def _service_legs(legs):
         if device_template is not None:
             service_leg["device_template"] = device_template
         service_legs.append(service_leg)
+    from .services import _check_legs
+
+    try:
+        _check_legs(service_legs)
+    except ValueError:
+        raise SampleInputRefusedError(LEG_RULES_REFUSED) from None
     return service_legs
 
 
@@ -443,7 +489,7 @@ class EnrolBiometricMutation(graphene.Mutation):
     class Arguments:
         subject_id = graphene.String(required=True)
         modality = graphene.String(required=True)
-        sample = GenericScalar(
+        sample = BiometricInput(
             required=True, description="Base64-encoded sample as text, optionally with a data:...;base64, prefix.",
         )
         subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
@@ -492,7 +538,7 @@ class VerifyBiometricMutation(graphene.Mutation):
         subject_id = graphene.String(required=True)
         modality = graphene.String(required=True)
         subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
-        sample = GenericScalar(
+        sample = BiometricInput(
             required=False, description="Base64-encoded sample as text (server path), optionally with a data: prefix.",
         )
         position = graphene.String(required=False)
@@ -504,12 +550,12 @@ class VerifyBiometricMutation(graphene.Mutation):
             required=False,
             description="Named risk profile from BIOMETRIC['RISK_PROFILES']; it may only raise the modality threshold.",
         )
-        device_vector = GenericScalar(
+        device_vector = BiometricInput(
             required=False,
             description="List of numbers: the vector the device extracted, ranked by the impersonation probe on the "
                         "device path.",
         )
-        device_template = GenericScalar(
+        device_template = BiometricInput(
             required=False,
             description="Base64 text: the template the device extracted, ranked by the impersonation probe on the "
                         "device path.",
@@ -553,7 +599,7 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
     class Arguments:
         subject_id = graphene.String(required=True)
         subject_model = graphene.String(required=False, description="Defaults to BIOMETRIC['SUBJECT_MODEL'].")
-        legs = GenericScalar(
+        legs = BiometricInput(
             required=True,
             description="[{modality, sample, position, deviceScore, deviceVector, deviceTemplate}]: one object per "
                         "modality, a sample (base64 text, server path) or a device score.",
@@ -1144,7 +1190,7 @@ class Query(graphene.ObjectType):
     identify_biometric = graphene.List(
         BiometricMatchType,
         modality=graphene.String(required=True),
-        sample=GenericScalar(
+        sample=BiometricInput(
             required=True, description="Base64-encoded probe sample as text, optionally with a data: prefix.",
         ),
         top_k=graphene.Int(required=False, description="Default 5, clamped to 1..BIOMETRIC['MAX_TOP_K'] (50)."),

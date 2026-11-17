@@ -13,7 +13,7 @@ from core.models.openimis_graphql_test_case import BaseTestContext, openIMISGrap
 from core.test_helpers import create_test_interactive_user
 
 from biometric.models import BiometricMultimodalDecision, BiometricTemplate, BiometricVerification
-from biometric.schema import LEGS_REFUSED, SAMPLE_REFUSED, VECTOR_REFUSED
+from biometric.schema import LEG_RULES_REFUSED, LEGS_REFUSED, LITERAL_REFUSED, SAMPLE_REFUSED, VECTOR_REFUSED
 from biometric.tests.synthetic_subjects import SyntheticSubjectsMixin
 from biometric.tests.test_services import _MultimodalServiceTestCase
 from biometric.tests.test_subject_scope import _role
@@ -228,6 +228,63 @@ class TestSampleInputsOverHttp(SyntheticSubjectsMixin, _MultimodalServiceTestCas
 
     def test_identify_ranks_a_well_formed_probe_sample(self):
         self.enrol(SAMPLE)
-        answer = self.gql(IDENTIFY % "GenericScalar!", {"sample": "data:image/jpeg;base64," + SAMPLE})
+        answer = self.gql(IDENTIFY % "BiometricInput!", {"sample": "data:image/jpeg;base64," + SAMPLE})
         self.assertNotIn("errors", answer)
         self.assertEqual([match["subjectId"] for match in answer["data"]["identifyBiometric"]], ["s1"])
+
+    def test_a_literal_with_a_bare_name_or_a_nested_variable_is_refused_without_quoting_it(self):
+        name = SAMPLE.replace("+", "").replace("/", "").lstrip("0123456789")
+        nested = {field: value for field, value in (
+            ("modality", '"face", sample: "%s", position: $v' % SAMPLE),
+            ("sample", "$v"), ("deviceTemplate", "$v"), ("deviceVector", "[0.5, $v]"), ("deviceScore", "$v"),
+        )}
+        with EveryLogger() as capture:
+            answers = [self.gql('mutation { enrolBiometric(subjectId: "s1", modality: "face", sample: %s) { id } }'
+                                % name)]
+            answers.append(self.gql(
+                'mutation { verifyBiometric(subjectId: "s1", modality: "face", deviceScore: 0.9, '
+                'deviceVector: [%s, %s]) { verified } }' % (VECTOR_DIGITS, name)))
+            answers.append(self.gql('query { identifyBiometric(modality: "face", sample: %s) { subjectId } }' % name))
+            for field, value in nested.items():
+                with self.subTest(field=field):
+                    leg = "modality: %s" % value if field == "modality" else 'modality: "face", %s: %s' % (field, value)
+                    answers.append(self.gql(
+                        'mutation ($v: String) { verifyBiometricMultimodal(subjectId: "s1", legs: [{%s}]) '
+                        '{ outcome } }' % leg, {"v": TEMPLATE}))
+        self.assertRefused(answers, LITERAL_REFUSED)
+        self.assertNotIn(name[:24], json.dumps(answers))
+        self.assertQuotedNowhere(capture)
+        self.assertNotIn(name[:24], capture.text())
+        self.assertFalse(BiometricVerification.objects.exists())
+        self.assertFalse(BiometricMultimodalDecision.objects.exists())
+
+    def test_an_integer_out_of_the_int_range_is_refused_as_a_sample(self):
+        with EveryLogger() as capture:
+            answer = self.gql('mutation { enrolBiometric(subjectId: "s1", modality: "face", sample: 99999999999) '
+                              '{ id } }')
+        self.assertRefused([answer], SAMPLE_REFUSED % "sample")
+        self.assertNotIn("99999999999", json.dumps(answer) + capture.text())
+
+    def test_base64_with_data_after_its_padding_or_a_line_break_is_refused(self):
+        padded = base64.b64encode(b"raw-face-sample-of-the-person" * 3 + b"x").decode()
+        self.assertTrue(padded.endswith("="))
+        with EveryLogger() as capture:
+            answers = [self.enrol(padded + SAMPLE), self.enrol(SAMPLE[:40] + "\n" + SAMPLE[40:])]
+        self.assertRefused(answers, SAMPLE_REFUSED % "sample")
+        self.assertQuotedNowhere(capture)
+        self.assertFalse(BiometricTemplate.objects.exists())
+
+    def test_legs_breaking_the_leg_rules_are_refused_with_a_fixed_message(self):
+        face = {"modality": "face", "sample": SAMPLE}
+        with EveryLogger() as capture:
+            answers = [self.multimodal(legs) for legs in (
+                [],
+                [{"modality": "face"}],
+                [{**face, "deviceScore": 0.5}],
+                [face, face],
+                [{**face, "deviceVector": [float(VECTOR_DIGITS)]}],
+                [{"modality": "", "deviceScore": 0.5}],
+            )]
+        self.assertRefused(answers, LEG_RULES_REFUSED)
+        self.assertQuotedNowhere(capture)
+        self.assertFalse(BiometricVerification.objects.exists())
