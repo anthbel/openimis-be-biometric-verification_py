@@ -32,11 +32,27 @@ class SubjectRefusedError(ValueError):
 
 
 def resolve_subject_model(label):
-    """The model class a subject_model label names; SubjectRefusedError when none is installed."""
+    """The model class a subject_model label names, in any case; SubjectRefusedError when none is installed."""
     try:
-        return apps.get_model(label)
+        return apps.get_model(canonical_subject_model(label))
     except (LookupError, ValueError, TypeError):
         raise SubjectRefusedError(SUBJECT_MODEL_UNKNOWN, f"Unknown subject model '{label}'.") from None
+
+
+def canonical_subject_model(label):
+    """
+    The installed model's own label ("app_label.ModelName") for a label naming
+    it in any case; the label unchanged when it names no installed model. Rows,
+    consent decisions and consent checks always see the model's own label.
+    """
+    if not isinstance(label, str):
+        return label
+    try:
+        return apps.get_model(label)._meta.label
+    except (LookupError, ValueError):
+        pass
+    lowered = label.lower()
+    return next((model._meta.label for model in apps.get_models() if model._meta.label_lower == lowered), label)
 
 
 def is_location_scoped(model):

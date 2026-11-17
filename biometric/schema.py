@@ -9,6 +9,7 @@ from core import ExtendedConnection
 from core.schema import OrderedDjangoFilterConnectionField
 
 from .apps import BiometricConfig
+from .subjects import canonical_subject_model
 from .models import (
     BiometricAlert,
     BiometricAuditEvent,
@@ -536,7 +537,12 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
 
 
 class RecordBiometricConsentMutation(graphene.Mutation):
-    """Records a consent decision gating enrol() when REQUIRE_CONSENT is set."""
+    """
+    Records a consent decision gating enrol() when REQUIRE_CONSENT is set
+    (services.record_consent). A grant runs every registered consent check,
+    for every caller, and records nothing when one refuses; a refusal is
+    recorded unchecked.
+    """
 
     class Arguments:
         subject_id = graphene.String(required=True)
@@ -555,12 +561,10 @@ class RecordBiometricConsentMutation(graphene.Mutation):
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
         _require_subject(user, subject_model, subject_id)
 
-        from .models import BiometricConsent
+        from .services import record_consent
 
-        subject_model = subject_model or BiometricConfig.subject_model
-        consent = BiometricConsent.objects.create(
-            subject_model=subject_model, subject_id=str(subject_id), modality=modality,
-            granted=granted, recorded_by=user.username, note=note or "",
+        consent = record_consent(
+            subject_model, subject_id, modality, granted, actor=user.username, note=note or "",
         )
         return cls(ok=True, id=str(consent.id))
 
@@ -1281,7 +1285,7 @@ class Query(graphene.ObjectType):
         from .audit_chain import ACTION_TEMPLATE_LIST, audit_enabled, record_event
         from .models import BiometricTemplate
 
-        subject_model = subject_model or BiometricConfig.subject_model
+        subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
         rows = list(BiometricTemplate.objects.filter(
             subject_model=subject_model, subject_id=str(subject_id), validity_to__isnull=True,
         ))
@@ -1309,7 +1313,7 @@ class Query(graphene.ObjectType):
 
         from .models import BiometricVerification as BiometricVerificationModel
 
-        subject_model = subject_model or BiometricConfig.subject_model
+        subject_model = canonical_subject_model(subject_model or BiometricConfig.subject_model)
         rows = BiometricVerificationModel.objects.filter(
             subject_model=subject_model, subject_id=str(subject_id),
         ).order_by("-created_at")

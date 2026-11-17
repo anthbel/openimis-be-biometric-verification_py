@@ -906,7 +906,7 @@ class TestEnrolQualityGate(_MultimodalServiceTestCase):
 
         self.assertEqual(row.vector, _hash_to_vector(sample, 8))
         self.assertIsNone(row.quality)
-        self.assertEqual(row.metadata, {"cuvee_id": 3})
+        self.assertEqual(row.metadata, {"cuvee_id": 3, "consent_checks": []})
         previous.refresh_from_db()
         self.assertIsNotNone(previous.validity_to)
         self.assertIsNone(row.validity_to)
@@ -988,7 +988,7 @@ class TestEnrolQualityGate(_MultimodalServiceTestCase):
         row = enrol(SUBJECT_MODEL, "s1", "face", _sharp_png(), actor="tester", metadata={"k": "v"})
         row.refresh_from_db()
 
-        self.assertEqual(row.metadata, {"k": "v"})
+        self.assertEqual(row.metadata, {"k": "v", "consent_checks": []})
         coordinates = {c for point in landmarks.values() for c in point} | set(box)
         keys, leaves = _keys_and_leaves(row.quality_verdict)
         self.assertFalse({"box", "landmarks", "face", "pose"} & keys)

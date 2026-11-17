@@ -162,10 +162,27 @@ configuration, all optional with defaults:
 "REQUIRE_CONSENT": False,
 "MAX_TOP_K": 50,                  # identifyBiometric clamps topK to 1..MAX_TOP_K
 "DEDUP_THRESHOLD": {"face": 0.62},  # similarity at/above which a candidate is emitted
+"DEDUP_MODALITIES": ["face"],     # modalities that get a candidate source (validated; face source only)
 "FUSION": {"weights": {"face": 1.0}, "thresholds": {"accept": 0.7, "review": 0.6},
            "floors": {}, "floor_decision": "review"},
 "RISK_PROFILES": {},              # named tighten-only overrides of FUSION / MODALITIES (§6.8)
 ```
+
+The `biometric` app resolves its configuration with `biometric.apps.resolve_config(module_cfg=None)`:
+defaults, then the module configuration (the stored row when `module_cfg` is `None`), then
+`settings.BIOMETRIC`, which wins. `TEMPLATE_KEY` is the first non-blank value of
+`settings.BIOMETRIC`, the module configuration and the `BIOMETRIC_TEMPLATE_KEY` environment
+variable; an empty or whitespace-only value is no key. The key is never written to the module
+configuration, returned by a query or logged.
+
+`BiometricConfig.refresh_config()` runs on `request_started` and at the start of every
+`BiometricCandidateSource.scan()`: it reads the stored row (one query) and applies the resolved
+configuration when it differs from the one in use, so a changed `DEDUP_THRESHOLD` applies to the
+next scan. A validator registered with `core.module_config_registry` refuses a module
+configuration (`ValidationError`, naming the key) whose effective `DEDUP_THRESHOLD` holds a
+non-numeric value (booleans included), or whose `DEDUP_MODALITIES` holds a modality outside
+`MODALITIES` or without a numeric `DEDUP_THRESHOLD` entry. A stored row failing those checks is
+logged by key, never with its values, and the configuration in use stays.
 
 ### 3.3 Models — new migrations only (`0005_…` onward); existing tables untouched
 
@@ -201,6 +218,7 @@ configuration, all optional with defaults:
 - `actor` char(64); `created_at`. Never stores a sample. `ClaimFacialAudit` stays as is.
 
 `BiometricConsent` — subject ref; `modality`; `granted` bool; `recorded_by`; `recorded_at`; `note`.
+Written by `services.record_consent()` (and `recordBiometricConsent`, which calls it).
 
 `BiometricRetentionPolicy` — singleton: `template_retention_days` int null;
 `purge_enabled` bool; a check constraint requires both to be set for a purge to act.
@@ -217,9 +235,23 @@ enrol(subject_model, subject_id, modality, sample: bytes, *, position=None, acto
       device_template: Extracted | None = None) -> BiometricTemplate
 ```
 Refuses when `REQUIRE_CONSENT` and the latest `BiometricConsent` row for the subject and modality
-(by `recorded_at`) is missing or has `granted=false`: a later refusal revokes an earlier grant. With a `MatcherProvider`
+(by `recorded_at`) is missing or has `granted=false`: a later refusal revokes an earlier grant.
+Every consent check registered with `register_consent_check(key, check)` then runs, for every
+caller, superusers included, before anything is extracted or written; `check(subject_model,
+subject_id, modality)` raises `ConsentRequiredError` to refuse. The keys of the checks that passed
+are stored in `metadata["consent_checks"]`, in registration order (`[]` when none is registered),
+on the extraction and the device template paths alike; a caller's value for that key is dropped.
+With a `MatcherProvider`
 of kind `device_reported`, `device_template` is stored as given (the device extracted it).
 Supersedes an active row with the same unique key (`validity_to = now`) rather than updating it.
+
+```python
+register_consent_check(key, check)          # same key again replaces the check
+run_consent_checks(subject_model, subject_id, modality) -> list[str]   # passing keys, in order
+record_consent(subject_model, subject_id, modality, granted, *, actor, note="") -> BiometricConsent
+```
+`record_consent` runs every registered check before recording a grant and records nothing when
+one refuses; a refusal (`granted=False`) is recorded unchecked.
 
 ```python
 verify(subject_model, subject_id, modality, *, sample: bytes | None = None, position=None,
@@ -549,11 +581,12 @@ where the Postgres server has the `vector` extension.
   LIMIT k`), inside a transaction that sets `SET LOCAL hnsw.ef_search =
   BiometricPgvectorConfig.hnsw_ef_search`, applying the `scope` filter through the template join
   and `exclude_subject`. `BiometricPgvectorConfig.ready()` reads `HNSW_EF_SEARCH` (default 200)
-  once, from the `biometric` ModuleConfiguration row then `settings.BIOMETRIC`; a change takes
-  effect at the next start.
+  once, through `biometric.apps.resolve_config()` (the `biometric` ModuleConfiguration row, then
+  `settings.BIOMETRIC`); a change takes effect at the next start.
   Returns the same `Match` objects as the NumPy path, similarity = 1 − cosine distance.
 - Plaintext: the index stores vectors in clear — an ANN index cannot search encrypted
-  vectors. When `TEMPLATE_KEY` is set, `biometric_pgvector` refuses to start
+  vectors. When `TEMPLATE_KEY` resolves to a key (including one given only by
+  `BIOMETRIC_TEMPLATE_KEY`), `biometric_pgvector` refuses to start
   (`ImproperlyConfigured`) unless `BIOMETRIC["ALLOW_PLAINTEXT_INDEX"]` is `True`. README
   states this trade-off plainly.
 - Tests run against a vector-capable Postgres: container `pgvector/pgvector:pg13` on

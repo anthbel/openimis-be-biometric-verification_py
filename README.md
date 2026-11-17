@@ -73,6 +73,7 @@ BIOMETRIC = {
     "TEMPLATE_KEY": None,      # Fernet key (cryptography.fernet); templates/vectors encrypted at rest when set
     "REQUIRE_CONSENT": False,
     "DEDUP_THRESHOLD": {"face": 0.62},   # similarity at/above which a dedup candidate is emitted
+    "DEDUP_MODALITIES": ["face"],        # modalities that get a candidate source (only the face source is registered)
     "FUSION": {
         "weights": {"face": 1.0},
         "thresholds": {"accept": 0.7, "review": 0.6},
@@ -104,6 +105,31 @@ BIOMETRIC = {
 
 `face`'s default threshold (0.32) is on the similarity scale (1.0 = identical,
 0.0 = orthogonal) — not the legacy `biometric_verification` distance scale.
+
+**Precedence and re-reading.** `biometric.apps.resolve_config(module_cfg=None)`
+returns the effective configuration: the defaults, merged with the module
+configuration (the stored `biometric` row when `module_cfg` is `None`), then
+`settings.BIOMETRIC` (upper- or lower-case keys), which wins. `ready()` applies
+it. `BiometricConfig.refresh_config()` re-reads the stored row on every
+`request_started` and at the start of every `BiometricCandidateSource.scan()`,
+and applies it when the resolved configuration differs from the one in use (one
+query, no reload otherwise): a changed `DEDUP_THRESHOLD` applies to the next
+scan in the same process. A stored configuration that fails the checks below is
+logged by key, never with its values, and the configuration in use stays.
+
+**Validation.** A validator registered with `core.module_config_registry`
+refuses a `biometric` module configuration (`ValidationError`, naming the key)
+whose effective configuration has a `DEDUP_THRESHOLD` value that is not a
+number (booleans included), a `DEDUP_MODALITIES` entry that is not a key of
+`MODALITIES`, or a `DEDUP_MODALITIES` entry without a numeric
+`DEDUP_THRESHOLD` entry.
+
+**Template key.** `TEMPLATE_KEY` comes from the first non-blank value of
+`settings.BIOMETRIC`, the module configuration and the `BIOMETRIC_TEMPLATE_KEY`
+environment variable. An empty or whitespace-only value counts as none; with no
+key at all templates are stored in plaintext (`encrypted=False`). The key is
+never written to the module configuration, returned by a GraphQL query or
+logged.
 
 ### Enrolment quality gate
 
@@ -283,8 +309,22 @@ provider_class)`; resolve the one configured for a modality with
 - `enrol(subject_model=None, subject_id, modality, sample, *, position=None, actor, metadata=None, device_template=None)`
   — extracts (or accepts a device template for) one sample, superseding any
   previous active row on the same key. Refused when `REQUIRE_CONSENT` and no
-  `BiometricConsent` was granted. `subject_model` defaults to
-  `BIOMETRIC["SUBJECT_MODEL"]`.
+  `BiometricConsent` was granted. Every registered consent check runs, for
+  every caller, before anything is extracted or written; the keys of the checks
+  that passed are stored in `metadata["consent_checks"]` (`[]` when none is
+  registered; a caller's value for that key is dropped). `subject_model`
+  defaults to `BIOMETRIC["SUBJECT_MODEL"]`.
+- `register_consent_check(key, check)` — `check(subject_model, subject_id, modality)`
+  raises `ConsentRequiredError` to refuse. Registering a key again replaces its
+  check. `run_consent_checks(subject_model, subject_id, modality)` runs them all
+  and returns the passing keys in registration order.
+- A subject model label naming an installed model in any case (`individual.individual`) is replaced by the
+  model's own label (`individual.Individual`) before the checks run, before a row is stored and in every
+  lookup, the configured `SUBJECT_MODEL` included (`subjects.canonical_subject_model`).
+- `record_consent(subject_model, subject_id, modality, granted, *, actor, note="")`
+  — records a `BiometricConsent` row. A grant runs every registered consent
+  check first and records nothing when one refuses; a refusal (`granted=False`)
+  is recorded unchecked. `recordBiometricConsent` calls it.
 - `verify(subject_model=None, subject_id, modality, *, sample=None, device_score=None, ..., actor)`
   — server path (extract + compare) or device path (`device_score` checked
   against the modality threshold). Always writes a `BiometricVerification` row.
@@ -396,7 +436,8 @@ the corresponding side row — nothing needs to be re-run after normal use.
 
 **An ANN index cannot search encrypted vectors.** `biometric_vector_index`
 always stores the embedding in clear, decrypted from `biometric_template` at
-sync time, regardless of `BIOMETRIC["TEMPLATE_KEY"]`. If a key is set —
+sync time, regardless of `BIOMETRIC["TEMPLATE_KEY"]`. If a key is set (in the
+configuration or through `BIOMETRIC_TEMPLATE_KEY`) —
 templates are meant to be encrypted at rest — installing this app would
 silently defeat that guarantee, so `biometric_pgvector` refuses to start
 (`ImproperlyConfigured` at `AppConfig.ready()`) unless
