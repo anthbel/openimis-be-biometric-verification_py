@@ -265,11 +265,42 @@ class TestSampleInputsOverHttp(SyntheticSubjectsMixin, _MultimodalServiceTestCas
         self.assertRefused([answer], SAMPLE_REFUSED % "sample")
         self.assertNotIn("99999999999", json.dumps(answer) + capture.text())
 
-    def test_base64_with_data_after_its_padding_or_a_line_break_is_refused(self):
+    def test_base64_with_data_after_its_padding_is_refused(self):
         padded = base64.b64encode(b"raw-face-sample-of-the-person" * 3 + b"x").decode()
         self.assertTrue(padded.endswith("="))
         with EveryLogger() as capture:
-            answers = [self.enrol(padded + SAMPLE), self.enrol(SAMPLE[:40] + "\n" + SAMPLE[40:])]
+            answers = [self.enrol(padded + SAMPLE), self.enrol(padded + "\r\n" + SAMPLE)]
+        self.assertRefused(answers, SAMPLE_REFUSED % "sample")
+        self.assertQuotedNowhere(capture)
+        self.assertFalse(BiometricTemplate.objects.exists())
+
+    def enrolled_vector(self, sample, subject):
+        answer = self.gql(ENROL.replace('subjectId: "s1"', 'subjectId: "%s"' % subject)
+                          % _argument_type("mutation", "enrolBiometric", "sample"), {"sample": sample})
+        self.assertNotIn("errors", answer)
+        return BiometricTemplate.objects.get(subject_id=subject, modality="face", validity_to__isnull=True).vector
+
+    def test_wrapped_or_space_padded_standard_base64_enrols_the_same_template(self):
+        wrapped = "\n".join(SAMPLE[i:i + 76] for i in range(0, len(SAMPLE), 76))
+        crlf = "\r\n".join(SAMPLE[i:i + 76] for i in range(0, len(SAMPLE), 76)) + "\r\n"
+        data_uri = "data:image/jpeg;base64," + "\n".join(SAMPLE[i:i + 20] for i in range(0, len(SAMPLE), 20))
+        spaced = "  \t" + SAMPLE + " \n "
+        for text in (wrapped, crlf, data_uri, spaced):
+            self.assertNotEqual(text, SAMPLE)
+        self.assertIn("\n", wrapped)
+        expected = self.enrolled_vector(SAMPLE, "plain")
+        for index, text in enumerate((wrapped, crlf, data_uri, spaced)):
+            with self.subTest(text=repr(text[:30])):
+                self.assertEqual(self.enrolled_vector(text, "wrap%d" % index), expected)
+
+    def test_url_safe_and_other_characters_are_still_refused_without_quoting_them(self):
+        raw = b"\xfb\xff\xfe" * 30
+        url_safe = base64.urlsafe_b64encode(raw).decode()
+        self.assertTrue(set("-_") & set(url_safe))
+        refused = [url_safe, SAMPLE[:40] + "*" + SAMPLE[40:], SAMPLE[:40] + "\x0b" + SAMPLE[40:],
+                   SAMPLE[:40] + "\u00a0" + SAMPLE[40:], SAMPLE[:40] + "\x00" + SAMPLE[40:]]
+        with EveryLogger() as capture:
+            answers = [self.enrol(text) for text in refused]
         self.assertRefused(answers, SAMPLE_REFUSED % "sample")
         self.assertQuotedNowhere(capture)
         self.assertFalse(BiometricTemplate.objects.exists())

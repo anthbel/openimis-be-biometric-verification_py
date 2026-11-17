@@ -377,8 +377,10 @@ A leg holds `modality` (text, required) and any of `sample` (base64 text),
 least one leg, one per modality, each with exactly one of `sample` and
 `deviceScore`; `deviceVector` and `deviceTemplate` go with `deviceScore` only.
 
-Base64 is strict: only the base64 alphabet, padding at the end, no line breaks
-or other characters, after an optional `data:...;base64,` prefix.
+Base64 is the standard alphabet, strict: padding only at the end and no other
+characters (URL-safe `-` and `_` included), after an optional
+`data:...;base64,` prefix. Spaces, tabs and line breaks (`\n`, `\r\n`, as in
+MIME line-wrapped base64) are ignored.
 
 A value of another shape (an unknown or missing field, a number or object in
 place of text, text that is not base64, legs breaking the leg rules) refuses

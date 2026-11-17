@@ -85,14 +85,21 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+_DROP_WHITESPACE = str.maketrans("", "", " \t\r\n")
+
+
 def _decode_sample(sample, argument="sample"):
-    """Base64 sample, optionally with a data-URI prefix; None stays None."""
+    """Standard base64 sample, optionally with a data-URI prefix; None stays None.
+
+    Spaces, tabs and line breaks (MIME line wrapping) are dropped before the strict decode;
+    any other character outside the alphabet is refused."""
     if sample is None:
         return None
     if not isinstance(sample, str):
         raise SampleInputRefusedError(SAMPLE_REFUSED % argument)
     if "," in sample:
         sample = sample.split(",", 1)[1]
+    sample = sample.translate(_DROP_WHITESPACE)
     try:
         return base64.b64decode(sample, validate=True)
     except (binascii.Error, ValueError):
