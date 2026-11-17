@@ -10,6 +10,8 @@ apps.py never registers it anywhere in that case (there is no registry).
 
 import logging
 
+from django.db.models import Q
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -24,6 +26,7 @@ except ImportError:
     class Watermark:
         updated_at: Optional[datetime] = None
         last_id: Optional[str] = None
+        snapshot: Optional[object] = None
 
     @dataclass(frozen=True)
     class Candidate:
@@ -48,6 +51,11 @@ except ImportError:
     def order_pair(a: str, b: str):
         return (a, b) if a < b else (b, a)
 
+try:
+    from deduplication.sources.snapshot import ReadSnapshot
+except ImportError:
+    ReadSnapshot = None
+
 
 class BiometricCandidateSource(CandidateSource):
     """
@@ -68,7 +76,6 @@ class BiometricCandidateSource(CandidateSource):
     def scan(self, since: "Optional[Watermark]" = None):
         from . import crypto
         from .apps import BiometricConfig
-        from .models import BiometricTemplate
         from .registry import ProviderRegistry
         from .services import Gallery, comparable_preprocessing, identify, log_preprocessing_skips
 
@@ -77,14 +84,23 @@ class BiometricCandidateSource(CandidateSource):
         provider = None
         gallery = None
 
-        queryset = BiometricTemplate.objects.filter(
-            modality=self.modality, validity_to__isnull=True,
-        ).order_by("date_updated", "id")
+        queryset = self._active().order_by("date_updated", "id")
 
-        if since is not None and since.updated_at is not None:
-            queryset = queryset.filter(date_updated__gte=since.updated_at)
+        # A cursor without a snapshot, or with one of another database cluster, cannot tell a template committed
+        # after its scan from one it read: every active template is probed again.
+        snapshot = getattr(since, "snapshot", None)
+        if since is not None and since.updated_at is not None and snapshot is not None and snapshot.current():
+            after = Q(date_updated__gt=since.updated_at)
             if since.last_id is not None:
-                queryset = queryset.exclude(date_updated=since.updated_at, id__lte=since.last_id)
+                after |= Q(date_updated=since.updated_at, id__gt=since.last_id)
+            else:
+                after |= Q(date_updated=since.updated_at)
+            unread = [
+                template_id for template_id, is_old, version in snapshot.annotate(self._active())
+                .filter(_snapshot_old=False).values_list("id", "_snapshot_old", "_snapshot_version")
+                if not snapshot.read(is_old, version)
+            ]
+            queryset = queryset.filter(after | Q(id__in=unread))
 
         seen_pairs = set()
         skipped = 0
@@ -154,33 +170,42 @@ class BiometricCandidateSource(CandidateSource):
     def covered(self, subject_model, subject_ids, state):
         """The ids among ``subject_ids``, as passed, that the last completed scan covered (``state`` is the
         source's ScanState row): a subject whose every active template of the modality is at or before the
-        cursor, and a subject without one, whatever the cursor. Nobody is covered until a scan has completed
-        (``state.last_scan_at`` set)."""
-        from .models import BiometricTemplate
-
+        cursor and read by the scan's snapshot, and a subject without one, whatever the cursor. Nobody is covered
+        until a scan has completed (``state.last_scan_at`` set), nor by a state without a snapshot or with one of
+        another database cluster; without the deduplication module's snapshots, the cursor alone applies."""
         by_key = {str(subject_id): subject_id for subject_id in subject_ids}
         if state is None or getattr(state, "last_scan_at", None) is None or not by_key:
             return set()
         cursor_at, cursor_id = state.updated_at, state.last_id or ""
+        templates = self._active().filter(subject_model=subject_model, subject_id__in=list(by_key))
+        if ReadSnapshot is None:
+            rows = ((subject_id, updated, template_id, True) for subject_id, updated, template_id
+                    in templates.values_list("subject_id", "date_updated", "id"))
+        else:
+            snapshot = ReadSnapshot.of(state)
+            if snapshot is None or not snapshot.current():
+                return set()
+            rows = ((subject_id, updated, template_id, snapshot.read(is_old, version))
+                    for subject_id, updated, template_id, is_old, version in snapshot.annotate(templates).values_list(
+                        "subject_id", "date_updated", "id", "_snapshot_old", "_snapshot_version"))
         uncovered = {
             subject_id
-            for subject_id, updated, template_id in BiometricTemplate.objects.filter(
-                subject_model=subject_model, subject_id__in=list(by_key), modality=self.modality,
-                validity_to__isnull=True,
-            ).values_list("subject_id", "date_updated", "id")
-            if cursor_at is None or updated > cursor_at or (updated == cursor_at and str(template_id) > cursor_id)
+            for subject_id, updated, template_id, read in rows
+            if cursor_at is None or not read or updated > cursor_at
+            or (updated == cursor_at and str(template_id) > cursor_id)
         }
         return {subject_id for key, subject_id in by_key.items() if key not in uncovered}
 
     def watermark(self):
+        active = self._active()
+        snapshot = {"snapshot": ReadSnapshot.take(active)} if ReadSnapshot is not None else {}
+        last = active.order_by("-date_updated", "-id").values("date_updated", "id").first()
+        if not last:
+            return Watermark(**snapshot)
+        return Watermark(updated_at=last["date_updated"], last_id=str(last["id"]), **snapshot)
+
+    def _active(self):
+        """The active templates of the modality."""
         from .models import BiometricTemplate
 
-        last = (
-            BiometricTemplate.objects.filter(modality=self.modality, validity_to__isnull=True)
-            .order_by("-date_updated", "-id")
-            .values("date_updated", "id")
-            .first()
-        )
-        if not last:
-            return Watermark()
-        return Watermark(updated_at=last["date_updated"], last_id=str(last["id"]))
+        return BiometricTemplate.objects.filter(modality=self.modality, validity_to__isnull=True)

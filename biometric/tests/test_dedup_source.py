@@ -135,7 +135,7 @@ class TestWatermark(_DedupSourceTestCase):
         self._make_template("b-subject", [1.0, 0.0])  # arrives "since" the first watermark
 
         source = BiometricCandidateSource(modality="face")
-        candidates = list(source.scan(Watermark(updated_at=first_watermark.updated_at, last_id=first_watermark.last_id)))
+        candidates = list(source.scan(first_watermark))
 
         # Only the newly-scanned template drives a scan iteration, but it still
         # matches against the full gallery (including the earlier template).
@@ -148,10 +148,12 @@ class TestCovered(_DedupSourceTestCase):
 
     def state(self, watermark=None, scanned=True):
         """A stand-in for the source's ScanState row after a scan that took ``watermark`` as its cursor."""
-        watermark = watermark or Watermark()
+        watermark = watermark or BiometricCandidateSource(modality="face").watermark()
+        snapshot = getattr(watermark, "snapshot", None)
         return SimpleNamespace(
             kind="biometric", updated_at=watermark.updated_at, last_id=watermark.last_id or "",
             last_scan_at=datetime.now() if scanned else None,
+            summary={"snapshot": snapshot.as_json()} if snapshot is not None else {},
         )
 
     def test_an_empty_gallery_covers_every_subject_once_scanned(self):
@@ -217,5 +219,13 @@ class TestCovered(_DedupSourceTestCase):
         state = self.state(source.watermark())
         other = uuid.uuid4()
         self.assertEqual(source.covered(SUBJECT_MODEL, [person, other], state), {person, other})
-        later = self.state(Watermark(updated_at=state.updated_at - timedelta(seconds=1), last_id=""))
-        self.assertEqual(source.covered(SUBJECT_MODEL, [person, other], later), {other})
+        earlier = Watermark(updated_at=state.updated_at - timedelta(seconds=1), last_id="",
+                            snapshot=source.watermark().snapshot)
+        self.assertEqual(source.covered(SUBJECT_MODEL, [person, other], self.state(earlier)), {other})
+
+    def test_a_state_without_a_snapshot_covers_nobody(self):
+        self._make_template("a", [1.0, 0.0])
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        state.summary = {}
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a", "b"], state), set())
