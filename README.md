@@ -348,8 +348,8 @@ provider_class)`; resolve the one configured for a modality with
 
 ### GraphQL
 
-Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`,
-`acknowledgeBiometricAlert`, `resolveBiometricAlert`;
+Mutations `enrolBiometric`, `verifyBiometric`, `verifyBiometricMultimodal`,
+`recordBiometricConsent`, `acknowledgeBiometricAlert`, `resolveBiometricAlert`;
 queries `identifyBiometric(modality, sample, topK, excludeSubject)`,
 `biometricTemplates(subjectId, subjectModel)` (metadata only — never
 plaintext vectors/templates), `biometricVerifications(subjectId, subjectModel)`,
@@ -357,6 +357,38 @@ and the relay connections `biometricAuditEvents` and `biometricAlerts`.
 `subjectModel` is optional everywhere it appears, defaulting to
 `BIOMETRIC["SUBJECT_MODEL"]`. Samples travel base64 (optionally with a
 `data:...;base64,` prefix).
+
+Every argument carrying a sample or a template is a `GenericScalar` (a JSON
+value) checked by the resolver. A client declares its variables with that type:
+
+| Field | Argument | Type | Value |
+|---|---|---|---|
+| `enrolBiometric` | `sample` | `GenericScalar!` | base64 text |
+| `verifyBiometric` | `sample` | `GenericScalar` | base64 text |
+| `verifyBiometric` | `deviceTemplate` | `GenericScalar` | base64 text |
+| `verifyBiometric` | `deviceVector` | `GenericScalar` | list of numbers |
+| `verifyBiometricMultimodal` | `legs` | `GenericScalar!` | list of `{modality, sample, position, deviceScore, deviceVector, deviceTemplate}` |
+
+A leg holds `modality` (text, required) and any of `sample` (base64 text),
+`position` (text), `deviceScore` (number), `deviceVector` (list of numbers) and
+`deviceTemplate` (base64 text); a null field counts as absent. Pass `legs` as
+one variable or as a literal written in full: a variable nested inside a `legs`
+literal reaches the resolver as null.
+
+A value of another shape (an unknown or missing field, a number or object in
+place of text, text that is not base64) refuses the call with one error whose
+`extensions.code` is `BIOMETRIC_SAMPLE_INPUT_REFUSED` and whose message is a
+fixed text naming the argument; it quotes nothing sent, and nothing is
+written.
+
+```graphql
+mutation ($sample: GenericScalar!) {
+  enrolBiometric(subjectId: "...", modality: "face", sample: $sample) { id }
+}
+mutation ($legs: GenericScalar!) {
+  verifyBiometricMultimodal(subjectId: "...", legs: $legs) { outcome }
+}
+```
 
 ### Deduplication seam
 

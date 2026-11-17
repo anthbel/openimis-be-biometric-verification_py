@@ -326,6 +326,15 @@ Mutations `enrolBiometric`, `verifyBiometric`, `recordBiometricConsent`; queries
 `gql_biometric_enrol_perms=["174001"]`, `gql_biometric_verify_perms=["174002"]`,
 `gql_biometric_identify_perms=["174003"]`, `gql_biometric_read_perms=["174004"]`, following
 the pattern of the module's existing rights. Samples travel base64.
+The mutation arguments that carry a sample or a template are `GenericScalar` (a JSON value), whose
+shape the resolver checks: `enrolBiometric(sample)`, `verifyBiometric(sample, deviceTemplate,
+deviceVector)` and `verifyBiometricMultimodal(legs)`. A value of another shape, an unknown or
+missing leg field included, refuses the call with a fixed message and `extensions.code`
+`BIOMETRIC_SAMPLE_INPUT_REFUSED`, before the subject check and before any write; the message
+quotes nothing sent. graphql-core refuses an input object or a scalar that does not match its type
+with an error quoting the whole variable or literal, samples included, and the assembly's GraphQL
+view logs that error. A sample or template is base64 text, optionally with a
+`data:...;base64,` prefix; a text that is not base64 is refused the same way.
 Every mutation of the `biometric` app (`enrolBiometric`, `verifyBiometric`,
 `verifyBiometricMultimodal`, `recordBiometricConsent`, `acknowledgeBiometricAlert`,
 `resolveBiometricAlert`, `verifyBiometricAuditChain`) first runs core's CSRF check
@@ -957,9 +966,10 @@ and swallows it. The payload links two subjects: a subscriber applies its own ac
 null when the probe did not run. `matchedSubjectModel`, `matchedSubjectId` and `candidates` are
 filled only for a caller holding `gql_biometric_identify_perms` (174003); with 174002 or 174004
 alone the caller gets the status, the verdict and the scores.
-Both also expose `impersonationSkipReason: String`. `verifyBiometric` takes `deviceVector: [Float!]`
-and `deviceTemplate: String` (base64), passed to `verify()` as `device_template`;
-`BiometricVerifyLegInput` of `verifyBiometricMultimodal` takes the same two fields. On a
+Both also expose `impersonationSkipReason: String`. `verifyBiometric` takes `deviceVector` (a list of
+numbers) and `deviceTemplate` (base64 text), both `GenericScalar` checked by the resolver (§3.6),
+passed to `verify()` as `device_template`; a leg of `verifyBiometricMultimodal` takes the same two
+fields. On a
 `device_reported` modality, the only one taking `deviceScore`, the probe records
 `provider_matches_on_device` whatever they hold.
 
@@ -1240,10 +1250,13 @@ verify_multimodal(subject_model=None, subject_id=None, legs=None, *, fallback=Fa
 
 GraphQL mutation `verifyBiometricMultimodal`, right `gql_biometric_verify_perms` (174002):
 
-- Arguments: `subjectId: String!`, `subjectModel: String`, `legs: [BiometricVerifyLegInput!]!`,
+- Arguments: `subjectId: String!`, `subjectModel: String`, `legs: GenericScalar!`,
   `riskProfile: String`, `fallback: Boolean`, `deviceId: String`, `context: JSONString`.
-- `BiometricVerifyLegInput`: `modality: String!`, `sample: String` (base64), `position: String`,
-  `deviceScore: Float`, `deviceVector: [Float!]`, `deviceTemplate: String` (base64).
+- `legs` is a list of objects, one per leg: `modality` (text, required), `sample` (base64 text),
+  `position` (text), `deviceScore` (number), `deviceVector` (list of numbers), `deviceTemplate`
+  (base64 text). A null field counts as absent. Any other shape, an unknown or missing field
+  included, refuses the call with a fixed message (§3.6). `legs` is one variable or a literal
+  written in full: a variable nested in a `legs` literal reaches the resolver as null.
 - Result `BiometricMultimodalVerifyResultType`: `decisionId` (UUID of the stored decision), `outcome`
   (accept | review | reject), `score`, `reasons`, `riskProfile`, `legs: [BiometricVerifyResultType!]!`.
   `BiometricVerifyResultType.verificationId` is the UUID of the leg's (or `verifyBiometric`'s)
