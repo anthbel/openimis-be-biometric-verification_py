@@ -536,7 +536,12 @@ class VerifyBiometricMultimodalMutation(graphene.Mutation):
 
 
 class RecordBiometricConsentMutation(graphene.Mutation):
-    """Records a consent decision gating enrol() when REQUIRE_CONSENT is set."""
+    """
+    Records a consent decision gating enrol() when REQUIRE_CONSENT is set
+    (services.record_consent). A grant runs every registered consent check,
+    for every caller, and records nothing when one refuses; a refusal is
+    recorded unchecked.
+    """
 
     class Arguments:
         subject_id = graphene.String(required=True)
@@ -555,12 +560,10 @@ class RecordBiometricConsentMutation(graphene.Mutation):
         _require_perms(user, BiometricConfig.gql_biometric_enrol_perms)
         _require_subject(user, subject_model, subject_id)
 
-        from .models import BiometricConsent
+        from .services import record_consent
 
-        subject_model = subject_model or BiometricConfig.subject_model
-        consent = BiometricConsent.objects.create(
-            subject_model=subject_model, subject_id=str(subject_id), modality=modality,
-            granted=granted, recorded_by=user.username, note=note or "",
+        consent = record_consent(
+            subject_model, subject_id, modality, granted, actor=user.username, note=note or "",
         )
         return cls(ok=True, id=str(consent.id))
 

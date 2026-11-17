@@ -72,6 +72,7 @@ class BiometricCandidateSource(CandidateSource):
         from .registry import ProviderRegistry
         from .services import Gallery, comparable_preprocessing, identify, log_preprocessing_skips
 
+        BiometricConfig.refresh_config()
         threshold = BiometricConfig.dedup_threshold.get(self.modality, 0.0)
         provider = None
         gallery = None

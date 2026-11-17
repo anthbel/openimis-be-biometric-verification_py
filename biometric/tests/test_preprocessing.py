@@ -133,13 +133,13 @@ class TestEnrolRecordsThePreprocessing(_PreprocessingTestCase):
         row = enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="agent", metadata={"cuvee_id": 3})
 
         row.refresh_from_db()
-        self.assertEqual(row.metadata, {"cuvee_id": 3, PREPROCESSING_KEY: "p1"})
+        self.assertEqual(row.metadata, {"cuvee_id": 3, PREPROCESSING_KEY: "p1", "consent_checks": []})
 
     def test_the_caller_cannot_set_the_tag(self):
         row = enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="agent", metadata={PREPROCESSING_KEY: "forged"})
 
         row.refresh_from_db()
-        self.assertEqual(row.metadata, {PREPROCESSING_KEY: "p1"})
+        self.assertEqual(row.metadata, {PREPROCESSING_KEY: "p1", "consent_checks": []})
 
     def test_a_device_template_gets_the_provider_tag(self):
         device = Extracted(vector=[0.1] * 8, metadata={PREPROCESSING_KEY: "forged", "device": "tab-1"})
@@ -147,7 +147,7 @@ class TestEnrolRecordsThePreprocessing(_PreprocessingTestCase):
         row = enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="agent", device_template=device)
 
         row.refresh_from_db()
-        self.assertEqual(row.metadata, {"device": "tab-1", PREPROCESSING_KEY: "p1"})
+        self.assertEqual(row.metadata, {"device": "tab-1", PREPROCESSING_KEY: "p1", "consent_checks": []})
 
     def test_a_provider_without_a_tag_stores_none_and_drops_a_caller_tag(self):
         BiometricConfig.modalities = {"face": {"provider": "fake_embedding", "threshold": 0.68}}
@@ -156,7 +156,7 @@ class TestEnrolRecordsThePreprocessing(_PreprocessingTestCase):
         row = enrol(SUBJECT_MODEL, "s1", "face", b"photo", actor="agent", metadata={PREPROCESSING_KEY: "forged"})
 
         row.refresh_from_db()
-        self.assertEqual(row.metadata, {})
+        self.assertEqual(row.metadata, {"consent_checks": []})
 
 
 class TestVerifySkipsOtherPreprocessing(_PreprocessingTestCase):

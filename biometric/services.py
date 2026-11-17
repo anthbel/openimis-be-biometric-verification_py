@@ -1,8 +1,9 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Dict, FrozenSet, List, Optional
+from typing import Callable, Dict, FrozenSet, List, Optional
 
+from .crypto import TemplateKeyError  # noqa: F401  (re-exported for callers)
 from .providers.base import VerificationResult
 from .quality import QualityRefusedError  # noqa: F401  (re-exported for callers)
 from .risk_profiles import RiskProfileError, UnknownRiskProfileError  # noqa: F401  (re-exported for callers)
@@ -53,7 +54,69 @@ class DevicePathRefusedError(ValueError):
 
 
 class ConsentRequiredError(PermissionError):
-    """Raised by enrol() when REQUIRE_CONSENT is set and the latest consent for the modality is not a grant."""
+    """
+    Raised by enrol() when REQUIRE_CONSENT is set and the latest consent for
+    the modality is not a grant, and by a registered consent check to refuse
+    an enrolment or a grant.
+    """
+
+
+# BiometricTemplate.metadata key listing the consent checks an enrolment passed;
+# written by enrol() only, never taken from the caller.
+CONSENT_CHECKS_KEY = "consent_checks"
+
+# key -> check(subject_model, subject_id, modality), in registration order.
+_consent_checks: Dict[str, Callable[[str, str, str], None]] = {}
+
+
+def register_consent_check(key, check):
+    """
+    Registers check(subject_model, subject_id, modality) under key; it raises
+    ConsentRequiredError to refuse. enrol() and a granting record_consent() run
+    every registered check, for every caller. Registering a key again replaces
+    its check and keeps its place in the order.
+    """
+    if not callable(check):
+        raise TypeError("register_consent_check() requires a callable check.")
+    _consent_checks[str(key)] = check
+
+
+def run_consent_checks(subject_model, subject_id, modality) -> List[str]:
+    """
+    Runs every registered consent check and returns their keys in registration
+    order. The first check that raises (ConsentRequiredError or any other
+    error) stops the run and its exception propagates.
+    """
+    passed = []
+    for key, check in list(_consent_checks.items()):
+        check(subject_model, subject_id, modality)
+        passed.append(key)
+    return passed
+
+
+def record_consent(subject_model, subject_id, modality, granted, *, actor, note=""):
+    """
+    Records a BiometricConsent decision and returns the row. A grant runs every
+    registered consent check first and writes nothing when one refuses; a
+    refusal (granted=False) is recorded without any check.
+
+    subject_model defaults to BIOMETRIC["SUBJECT_MODEL"] when omitted (§6.3).
+    """
+    from .apps import BiometricConfig
+    from .models import BiometricConsent
+
+    if subject_id is None or modality is None or granted is None:
+        raise TypeError("record_consent() requires subject_id, modality and granted.")
+
+    subject_model = subject_model or BiometricConfig.subject_model
+    subject_id = str(subject_id)
+    granted = bool(granted)
+    if granted:
+        run_consent_checks(subject_model, subject_id, modality)
+    return BiometricConsent.objects.create(
+        subject_model=subject_model, subject_id=subject_id, modality=modality,
+        granted=granted, recorded_by=actor, note=note or "",
+    )
 
 
 @dataclass(frozen=True)
@@ -104,6 +167,12 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     metadata["preprocessing"] holds the provider's preprocessing tag (§6.13),
     also for a device template; a caller's value for that key is dropped.
 
+    Every registered consent check (register_consent_check) runs for every
+    caller before anything is extracted or written; a refusal raises
+    ConsentRequiredError. metadata["consent_checks"] lists the keys of the
+    checks that passed ([] when none is registered), on both the extraction
+    and the device template path; a caller's value for that key is dropped.
+
     subject_model defaults to BIOMETRIC["SUBJECT_MODEL"] when omitted (§6.3).
     """
     from django.utils import timezone
@@ -135,6 +204,7 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
             raise ConsentRequiredError(
                 f"No granted consent for modality '{modality}' on {subject_model}:{subject_id}."
             )
+    consent_checks = run_consent_checks(subject_model, subject_id, modality)
 
     provider = ProviderRegistry.get_provider(modality)
     extracted = device_template if device_template is not None else provider.extract(sample, position=position)
@@ -143,6 +213,7 @@ def enrol(subject_model=None, subject_id=None, modality=None, sample=None, *, po
     stored_metadata.pop(PREPROCESSING_KEY, None)
     if provider_preprocessing(provider):
         stored_metadata[PREPROCESSING_KEY] = provider_preprocessing(provider)
+    stored_metadata[CONSENT_CHECKS_KEY] = consent_checks
 
     verdict = assess(
         modality, sample, extracted, server_extracted=device_template is None, mode_value=quality_mode(),
