@@ -55,6 +55,8 @@ class CandidateSource(abc.ABC):
     def scan(self, since: Watermark | None) -> Iterable[Candidate]: ...
     @abc.abstractmethod
     def watermark(self) -> Watermark: ...      # where the next scan starts
+    def covered(self, subject_model: str, subject_ids, state) -> set: ...
+        # the ids, as passed, its last scan covered; default: (date_updated, id) at or before the cursor
 
 def register(source: CandidateSource) -> None
 def sources() -> list[CandidateSource]        # registration order
@@ -275,6 +277,10 @@ modality whose `date_updated`/id are past the watermark, ranks each against the 
 its own subject excluded (top 5), and yields a `Candidate(kind="biometric", score, evidence={"modality", "provider",
 "model_name", "template_a", "template_b"})` per match at or above `DEDUP_THRESHOLD[modality]`.
 Pairs are ordered with `order_pair`. `watermark()` returns the newest `(date_updated, id)` seen.
+`covered(subject_model, subject_ids, state)` returns the ids among `subject_ids`, as passed, whose
+every active template of the modality is at or before the cursor of `state` (the source's `ScanState`
+row), and the ids without an active template of the modality, whatever the cursor: an empty gallery
+covers every subject. It covers nobody until a scan has completed (`state.last_scan_at` unset).
 On the numpy and template paths the scan reads and decrypts the gallery once
 (`services.Gallery`, the ranking `identify()` uses) and ranks every probe against it; a probe
 row found in the gallery reuses its decrypted value. On the pgvector path each probe runs

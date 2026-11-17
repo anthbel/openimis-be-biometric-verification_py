@@ -150,6 +150,27 @@ class BiometricCandidateSource(CandidateSource):
         row_key = crypto.row_key(template.encrypted, key)
         return crypto.decrypt_vector(template.vector, row_key), crypto.decrypt_bytes(template.template, row_key)
 
+    def covered(self, subject_model, subject_ids, state):
+        """The ids among ``subject_ids``, as passed, that the last completed scan covered (``state`` is the
+        source's ScanState row): a subject whose every active template of the modality is at or before the
+        cursor, and a subject without one, whatever the cursor. Nobody is covered until a scan has completed
+        (``state.last_scan_at`` set)."""
+        from .models import BiometricTemplate
+
+        by_key = {str(subject_id): subject_id for subject_id in subject_ids}
+        if state is None or getattr(state, "last_scan_at", None) is None or not by_key:
+            return set()
+        cursor_at, cursor_id = state.updated_at, state.last_id or ""
+        uncovered = {
+            subject_id
+            for subject_id, updated, template_id in BiometricTemplate.objects.filter(
+                subject_model=subject_model, subject_id__in=list(by_key), modality=self.modality,
+                validity_to__isnull=True,
+            ).values_list("subject_id", "date_updated", "id")
+            if cursor_at is None or updated > cursor_at or (updated == cursor_at and str(template_id) > cursor_id)
+        }
+        return {subject_id for key, subject_id in by_key.items() if key not in uncovered}
+
     def watermark(self):
         from .models import BiometricTemplate
 
