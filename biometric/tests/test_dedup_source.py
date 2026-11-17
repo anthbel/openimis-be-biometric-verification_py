@@ -5,6 +5,10 @@ shape is active in this environment (real deduplication.sources here, since
 it's installed side-by-side — see dedup_source.py's try/except).
 """
 
+import uuid
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+
 from django.test import TestCase
 
 from biometric.apps import BiometricConfig
@@ -136,3 +140,82 @@ class TestWatermark(_DedupSourceTestCase):
         # Only the newly-scanned template drives a scan iteration, but it still
         # matches against the full gallery (including the earlier template).
         self.assertEqual(len(candidates), 1)
+
+
+class TestCovered(_DedupSourceTestCase):
+    """covered(): a subject is covered when every active face template of it is at or before the cursor, or
+    when it has none, once a scan has completed."""
+
+    def state(self, watermark=None, scanned=True):
+        """A stand-in for the source's ScanState row after a scan that took ``watermark`` as its cursor."""
+        watermark = watermark or Watermark()
+        return SimpleNamespace(
+            kind="biometric", updated_at=watermark.updated_at, last_id=watermark.last_id or "",
+            last_scan_at=datetime.now() if scanned else None,
+        )
+
+    def test_an_empty_gallery_covers_every_subject_once_scanned(self):
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        self.assertIsNone(state.updated_at)
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a", "b"], state), {"a", "b"})
+
+    def test_no_completed_scan_covers_nobody(self):
+        source = BiometricCandidateSource(modality="face")
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a"], self.state(scanned=False)), set())
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a"], None), set())
+
+    def test_a_template_at_or_before_the_cursor_is_covered(self):
+        self._make_template("a", [1.0, 0.0])
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a", "b"], state), {"a", "b"})
+
+    def test_a_template_enrolled_after_the_cursor_holds_its_subject(self):
+        self._make_template("a", [1.0, 0.0])
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        self._make_template("b", [0.0, 1.0])
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a", "b", "c"], state), {"a", "c"})
+
+    def test_a_template_enrolled_after_an_empty_gallery_scan_holds_its_subject(self):
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        self._make_template("a", [1.0, 0.0])
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a", "b"], state), {"b"})
+
+    def test_one_newer_template_of_several_holds_the_subject(self):
+        self._make_template("a", [1.0, 0.0])
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        BiometricTemplate.objects.create(
+            subject_model=SUBJECT_MODEL, subject_id="a", modality="face", kind="embedding", vector=[0.0, 1.0],
+            provider="fake_embedding", model_name="other",
+        )
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a"], state), set())
+
+    def test_other_modalities_subject_models_and_superseded_templates_are_ignored(self):
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        BiometricTemplate.objects.create(
+            subject_model=SUBJECT_MODEL, subject_id="a", modality="fingerprint",
+            kind="template", template=b"x", provider="device_reported", model_name="",
+        )
+        BiometricTemplate.objects.create(
+            subject_model="insuree.Insuree", subject_id="a", modality="face", kind="embedding", vector=[1.0, 0.0],
+            provider="fake_embedding", model_name="",
+        )
+        superseded = self._make_template("a", [1.0, 0.0])
+        superseded.validity_to = datetime.now()
+        superseded.save()
+        self.assertEqual(source.covered(SUBJECT_MODEL, ["a"], state), {"a"})
+
+    def test_ids_come_back_as_passed(self):
+        person = uuid.uuid4()
+        self._make_template(str(person), [1.0, 0.0])
+        source = BiometricCandidateSource(modality="face")
+        state = self.state(source.watermark())
+        other = uuid.uuid4()
+        self.assertEqual(source.covered(SUBJECT_MODEL, [person, other], state), {person, other})
+        later = self.state(Watermark(updated_at=state.updated_at - timedelta(seconds=1), last_id=""))
+        self.assertEqual(source.covered(SUBJECT_MODEL, [person, other], later), {other})
